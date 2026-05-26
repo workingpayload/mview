@@ -6,9 +6,7 @@ import { cn } from '@/lib/utils'
 const ITEMS = [
   { kind: 'director', label: 'Same director' },
   { kind: 'cast', label: 'Shared cast' },
-  { kind: 'subject', label: 'Same subject' },
   { kind: 'genre', label: 'Same genre' },
-  { kind: 'recommended', label: 'Recommended' },
 ]
 
 export function EdgeLegend() {

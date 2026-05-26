@@ -1,15 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useMemo, useRef, useEffect } from 'react'
-import {
-  getDetails,
-  getRecommendations,
-  getCredits,
-  getWatchProviders,
-  getKeywords,
-  discoverBySubject,
-  discoverTvBySubject,
-  title,
-  year,
-} from '@/api/tmdb'
+import { getDetails, getRecommendations, getCredits, getWatchProviders, title, year } from '@/api/tmdb'
 import { pickConnectionReason } from '@/graph/connectionReason'
 import { buildEdge } from '@/graph/edges'
 import { placeAroundNode, radialLayout } from '@/graph/layout'
@@ -131,80 +121,17 @@ function reducer(state, action) {
 // Round-robin merge that preserves relative ordering within each list and
 // dedupes by id. Used to blend TMDB recommendations with regional-language
 // discover results so the user sees both flavours in the top of the rec list.
-function interleaveById(...lists) {
-  const out = []
-  const seen = new Set()
-  const idx = lists.map(() => 0)
-  let progress = true
-  while (progress) {
-    progress = false
-    for (let i = 0; i < lists.length; i++) {
-      while (idx[i] < lists[i].length) {
-        const item = lists[i][idx[i]++]
-        if (!seen.has(item.id)) {
-          seen.add(item.id)
-          out.push(item)
-          progress = true
-          break
-        }
-      }
-    }
-  }
-  return out
-}
-
-// Pool comes in already sorted by relevance: subject-overlap matches first
-// (sorted by how many of the center's keyword lists they appeared in), then
-// language+genre discover backfill. Deterministic top-N — variety naturally
-// comes from different searches producing different keyword sets, no need
-// to randomise picks within a single search.
-function sampleRegional(pool, count, excludeIds) {
-  return pool
-    .filter((r) => !excludeIds.has(`${r.media_type ?? 'movie'}-${r.id}`))
-    .slice(0, count)
-}
-
-// TMDB's /recommendations and /similar endpoints reflect co-viewing patterns,
-// not subject overlap. For English centres the Indian-viewer overlap bleeds
-// in unrelated Hindi titles (The Boys → Panchayat). Drop cross-language items
-// from baseRecs unless they're in the verified subject-overlap pool.
-function filterBaseRecsByLanguage({ baseRecs, centerLang, mediaType, regionalPool }) {
-  if (!centerLang) return baseRecs
-  const verifiedIds = new Set(
-    regionalPool.map((r) => `${r.media_type ?? mediaType}-${r.id}`),
-  )
-  return baseRecs.filter((r) => {
-    if (!r.original_language || r.original_language === centerLang) return true
-    return verifiedIds.has(`${r.media_type ?? mediaType}-${r.id}`)
+// Genre-only recommendation filter. Keeps items from TMDB's /recommendations
+// + /similar that share at least one genre with the center title. Everything
+// else is dropped. This is the entire recommendation policy now — no keyword
+// subject matching, no language augmentation, no popularity backfill.
+function filterByGenre(recs, centerGenreIds) {
+  if (!centerGenreIds?.length) return recs
+  const centerSet = new Set(centerGenreIds)
+  return recs.filter((r) => {
+    const recGenres = r.genre_ids ?? []
+    return recGenres.some((g) => centerSet.has(g))
   })
-}
-
-// Build a regional pool of ONLY items with verified keyword overlap with the
-// center title. No popularity backfill — if subject scoring finds zero
-// overlapping titles, the pool stays empty. Better to surface no regional
-// suggestion than a thematically unrelated one (e.g., Panchayat for The Boys
-// just because both are popular Hindi Drama).
-async function buildRegionalPool({ mediaType, details, keywords, language, region }) {
-  void details // kept for signature stability; not used now that backfill is gone
-  if (!language || language === 'any' || language === 'en') return []
-  const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
-  if (!keywordIds.length) return []
-  const originCountry = region ?? null
-
-  if (mediaType === 'movie') {
-    return discoverBySubject({
-      keywordIds,
-      originalLanguage: language,
-      originCountry,
-      mediaType,
-    }).catch(() => [])
-  }
-  // TV — no /keyword/X/tv endpoint, so we score per-candidate.
-  return discoverTvBySubject({
-    centerKeywordIds: keywordIds,
-    originalLanguage: language,
-    originCountry,
-  }).catch(() => [])
 }
 
 function markCentered(node, isCenter) {
@@ -297,32 +224,16 @@ export function GraphProvider({ children }) {
     const mediaType = item.media_type || (item.first_air_date ? 'tv' : 'movie')
     dispatch({ type: 'SET_LOADING', value: true })
     try {
-      const [details, credits, centerWatch, baseRecs, keywords] = await Promise.all([
+      const [details, credits, centerWatch, baseRecs] = await Promise.all([
         getDetails(mediaType, item.id),
         getCredits(mediaType, item.id),
         getWatchProviders(mediaType, item.id, regionRef.current).catch(() => ({ providers: [], link: null })),
         getRecommendations(mediaType, item.id),
-        getKeywords(mediaType, item.id).catch(() => []),
       ])
-      // Build a regional pool ordered by relevance — subject-overlap matches
-      // first (TMDB-curated keyword lists, scored by overlap with center),
-      // discover backfill behind. No rating signal at any stage.
-      const regionalPool = await buildRegionalPool({
-        mediaType,
-        details,
-        keywords,
-        language: langRef.current,
-        region: regionRef.current,
-      })
-      const excludeIds = new Set([nodeId(mediaType, item.id)])
-      const regional = sampleRegional(regionalPool, 8, excludeIds)
-      const cleanBaseRecs = filterBaseRecsByLanguage({
-        baseRecs,
-        centerLang: details?.original_language ?? null,
-        mediaType,
-        regionalPool,
-      })
-      const recs = regional.length ? interleaveById(cleanBaseRecs, regional) : cleanBaseRecs
+      // Recommendation policy: keep only items sharing at least one genre
+      // with the centre. No subject/keyword/language augmentation.
+      const centerGenreIds = (details?.genres ?? []).map((g) => g.id)
+      const recs = filterByGenre(baseRecs, centerGenreIds)
       const centerPos = { x: 0, y: 0 }
       const centerNode = buildNode({
         item: { ...item, ...details },
@@ -382,28 +293,13 @@ export function GraphProvider({ children }) {
       dispatch({ type: 'SET_LOADING', value: true })
       dispatch({ type: 'UPDATE_NODE_DATA', nodeId: targetNodeId, data: { expanding: true } })
       try {
-        const [details, credits, baseRecs, keywords] = await Promise.all([
+        const [details, credits, baseRecs] = await Promise.all([
           getDetails(mediaType, tmdbId),
           getCredits(mediaType, tmdbId),
           getRecommendations(mediaType, tmdbId),
-          getKeywords(mediaType, tmdbId).catch(() => []),
         ])
-        const regionalPool = await buildRegionalPool({
-          mediaType,
-          details,
-          keywords,
-          language: langRef.current,
-          region: regionRef.current,
-        })
-        const excludeIds = new Set(state.nodes.map((n) => n.id))
-        const regional = sampleRegional(regionalPool, 6, excludeIds)
-        const cleanBaseRecs = filterBaseRecsByLanguage({
-          baseRecs,
-          centerLang: details?.original_language ?? null,
-          mediaType,
-          regionalPool,
-        })
-        const recs = regional.length ? interleaveById(cleanBaseRecs, regional) : cleanBaseRecs
+        const centerGenreIds = (details?.genres ?? []).map((g) => g.id)
+        const recs = filterByGenre(baseRecs, centerGenreIds)
         const limit = 8
         const picks = recs.slice(0, limit)
         const recCreditsArr = await Promise.all(

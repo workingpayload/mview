@@ -1,22 +1,14 @@
-// Given the center item (its details + credits) and a recommendation item (basic search result),
-// determine the strongest connection reason. Returns { kind, label, weight }.
-// kind is also used for edge color tinting.
-//
-// Tier order (highest first):
-//   director  → shared director (most informative)
-//   cast      → shared lead actor
-//   subject   → tagged from discover-by-keywords (TMDB keyword overlap)
-//   genre     → same primary genre
-//   recommended → fallback (TMDB's algorithm with no detectable overlap)
-//
-// Rating-based linking was removed: similar vote averages are not a meaningful
-// recommendation signal compared with genre + subject overlap.
+// Recommendations are pre-filtered to items sharing at least one genre with
+// the centre. This function picks the strongest *label* for that edge:
+//   director → also shares a director (richest signal worth surfacing)
+//   cast     → also shares a top-billed actor
+//   genre    → default — the shared genre that qualified the rec
+// `recommended` only fires for edge cases where centre has no genres at all.
 import { primaryGenreId, genreLabel } from '@/lib/genres'
 
 const KIND_RANK = {
   director: 5,
   cast: 4,
-  subject: 3.5,
   genre: 3,
   recommended: 1,
 }
@@ -24,7 +16,6 @@ const KIND_RANK = {
 export const EDGE_KIND_COLORS = {
   director: '#f97316',    // orange
   cast: '#22d3ee',        // cyan
-  subject: '#ec4899',     // pink
   genre: '#a78bfa',       // violet
   recommended: '#737373', // neutral
 }
@@ -46,18 +37,23 @@ export function pickConnectionReason({ centerDetails, centerCredits, rec, recCre
       return { kind: 'cast', label: `Starring ${sharedActor.name}`, weight: KIND_RANK.cast }
     }
   }
-  // 3. Same TMDB keyword/subject (tagged by /discover with_keywords)
-  if (rec?.__subjectMatched) {
-    return { kind: 'subject', label: 'Same Subject', weight: KIND_RANK.subject }
+  // 3. Genre — the actual filter that qualified this rec. Prefer the rec's
+  //    primary genre when it matches centre's primary, otherwise pick the
+  //    first shared genre from centre's list.
+  const centerGenreIds = (centerDetails?.genres ?? []).map((g) => g.id)
+  const recGenreIds = rec?.genre_ids ?? []
+  const recPrimary = primaryGenreId(rec)
+  let sharedGenre = null
+  if (recPrimary && centerGenreIds.includes(recPrimary)) {
+    sharedGenre = recPrimary
+  } else {
+    sharedGenre = centerGenreIds.find((g) => recGenreIds.includes(g)) ?? null
   }
-  // 4. Same primary genre
-  const centerGenre = primaryGenreId(centerDetails)
-  const recGenre = primaryGenreId(rec)
-  if (centerGenre && recGenre && centerGenre === recGenre) {
-    return { kind: 'genre', label: `Same Genre · ${genreLabel(centerGenre)}`, weight: KIND_RANK.genre }
+  if (sharedGenre) {
+    return { kind: 'genre', label: `Same Genre · ${genreLabel(sharedGenre)}`, weight: KIND_RANK.genre }
   }
-  // 5. Fallback
-  return { kind: 'recommended', label: 'Recommended Match', weight: KIND_RANK.recommended }
+  // 4. Defensive fallback — should rarely fire because the rec list is genre-filtered.
+  return { kind: 'recommended', label: 'Recommended', weight: KIND_RANK.recommended }
 }
 
 function directorsOf(credits) {

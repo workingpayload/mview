@@ -152,9 +152,6 @@ export async function discoverBySubject({
     }
   }
   const out = [...score.values()]
-    // Require ≥2 keyword overlap. Single shared keyword (e.g., generic tags
-    // like "based on novel" or "satire") is too noisy a signal.
-    .filter(({ score: s }) => s >= 2)
     .sort((a, b) => b.score - a.score || (b.item.vote_count ?? 0) - (a.item.vote_count ?? 0))
     .map(({ item, score: s }) => ({
       ...item,
@@ -220,9 +217,7 @@ export async function discoverTvBySubject({
   )
 
   const matches = scored
-    // Require ≥2 keyword overlap so a single generic tag (e.g., "satire" or
-    // "based on book") shared between center and candidate doesn't qualify.
-    .filter((s) => s.score >= 2)
+    .filter((s) => s.score > 0)
     .sort((a, b) => b.score - a.score || (b.item.vote_count ?? 0) - (a.item.vote_count ?? 0))
     .map(({ item, score: s }) => ({
       ...item,
