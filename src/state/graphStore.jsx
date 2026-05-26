@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useMemo, useRef, useEffect } from 'react'
-import { getDetails, getRecommendations, getCredits, getWatchProviders, discoverByLanguage, title, year } from '@/api/tmdb'
+import { getDetails, getRecommendations, getCredits, getWatchProviders, getKeywords, discoverByLanguage, title, year } from '@/api/tmdb'
 import { pickConnectionReason } from '@/graph/connectionReason'
 import { buildEdge } from '@/graph/edges'
 import { placeAroundNode, radialLayout } from '@/graph/layout'
@@ -143,6 +143,31 @@ function interleaveById(...lists) {
   return out
 }
 
+// Pick `count` items from the regional-language pool with relevance bias and
+// just enough randomness that re-searching doesn't surface the exact same
+// titles every time. `excludeIds` is a Set of nodeIds already on the canvas
+// (movie-550 etc.) so we never propose a Hindi title the user is already
+// looking at.
+function sampleRegional(pool, count, excludeIds) {
+  const filtered = pool.filter((r) => {
+    const id = `${r.media_type ?? 'movie'}-${r.id}`
+    return !excludeIds.has(id)
+  })
+  const out = []
+  const remaining = [...filtered]
+  while (out.length < count && remaining.length > 0) {
+    // 65% of the time pick from the top 8 (relevance/popularity); otherwise
+    // dip into the longer tail for variety on repeated searches.
+    const topWindow = Math.min(8, remaining.length)
+    const useTop = Math.random() < 0.65
+    const idx = useTop
+      ? Math.floor(Math.random() * topWindow)
+      : Math.floor(Math.random() * remaining.length)
+    out.push(remaining.splice(idx, 1)[0])
+  }
+  return out
+}
+
 function markCentered(node, isCenter) {
   if (node.data?.isCenter === isCenter) return node
   return { ...node, data: { ...node.data, isCenter } }
@@ -233,17 +258,21 @@ export function GraphProvider({ children }) {
     const mediaType = item.media_type || (item.first_air_date ? 'tv' : 'movie')
     dispatch({ type: 'SET_LOADING', value: true })
     try {
-      const [details, credits, centerWatch, baseRecs] = await Promise.all([
+      const [details, credits, centerWatch, baseRecs, keywords] = await Promise.all([
         getDetails(mediaType, item.id),
         getCredits(mediaType, item.id),
         getWatchProviders(mediaType, item.id, regionRef.current).catch(() => ({ providers: [], link: null })),
         getRecommendations(mediaType, item.id),
+        getKeywords(mediaType, item.id).catch(() => []),
       ])
-      // Augment with popular regional-language titles in the same genre, then
-      // interleave so local content shows up alongside TMDB's default recs.
+      // Augment with keyword-relevant regional-language titles. Sampling adds
+      // variety so repeated searches don't show identical Hindi suggestions.
       const lang = langRef.current
       const genreId = details?.genres?.[0]?.id ?? null
-      const regional = await discoverByLanguage(mediaType, lang, genreId).catch(() => [])
+      const keywordIds = (keywords ?? []).slice(0, 3).map((k) => k.id)
+      const regionalPool = await discoverByLanguage(mediaType, lang, { genreId, keywordIds }).catch(() => [])
+      const excludeIds = new Set([nodeId(mediaType, item.id)])
+      const regional = sampleRegional(regionalPool, 8, excludeIds)
       const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
       const centerPos = { x: 0, y: 0 }
       const centerNode = buildNode({
@@ -304,14 +333,18 @@ export function GraphProvider({ children }) {
       dispatch({ type: 'SET_LOADING', value: true })
       dispatch({ type: 'UPDATE_NODE_DATA', nodeId: targetNodeId, data: { expanding: true } })
       try {
-        const [details, credits, baseRecs] = await Promise.all([
+        const [details, credits, baseRecs, keywords] = await Promise.all([
           getDetails(mediaType, tmdbId),
           getCredits(mediaType, tmdbId),
           getRecommendations(mediaType, tmdbId),
+          getKeywords(mediaType, tmdbId).catch(() => []),
         ])
         const lang = langRef.current
         const genreId = details?.genres?.[0]?.id ?? null
-        const regional = await discoverByLanguage(mediaType, lang, genreId).catch(() => [])
+        const keywordIds = (keywords ?? []).slice(0, 3).map((k) => k.id)
+        const regionalPool = await discoverByLanguage(mediaType, lang, { genreId, keywordIds }).catch(() => [])
+        const excludeIds = new Set(state.nodes.map((n) => n.id))
+        const regional = sampleRegional(regionalPool, 6, excludeIds)
         const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
         const limit = 8
         const picks = recs.slice(0, limit)

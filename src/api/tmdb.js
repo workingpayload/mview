@@ -48,6 +48,7 @@ const recsCache = new Map()
 const creditsCache = new Map()
 const providersCache = new Map()
 const discoverCache = new Map()
+const keywordsCache = new Map()
 
 function cacheKey(mediaType, id) {
   return `${mediaType}:${id}`
@@ -78,27 +79,66 @@ export async function getRecommendations(mediaType, id) {
   return list
 }
 
-// Popularity-sorted /discover results filtered by original language and (optional)
-// primary genre. Used to inject regional-language content into rec graphs that
-// TMDB's /recommendations heavily biases toward English.
-export async function discoverByLanguage(mediaType, language, genreId = null) {
+// Keywords help relevance: searching "Inception" returns Hindi *thrillers*,
+// not generic top-popularity Bollywood films.
+export async function getKeywords(mediaType, id) {
+  const k = cacheKey(mediaType, id)
+  if (keywordsCache.has(k)) return keywordsCache.get(k)
+  const { data } = await client.get(`/${mediaType}/${id}/keywords`)
+  // /movie returns {keywords:[]}, /tv returns {results:[]}
+  const list = mediaType === 'tv' ? (data.results ?? []) : (data.keywords ?? [])
+  keywordsCache.set(k, list)
+  return list
+}
+
+// /discover pool used to inject regional-language content into rec graphs.
+// Strategy: try keyword-augmented discover first (high relevance), then page
+// 1-2 of popularity-sorted as a fallback so we always have a fuller pool to
+// sample from. Returns a deduped array with keyword matches listed first.
+export async function discoverByLanguage(mediaType, language, opts = {}) {
+  const { genreId = null, keywordIds = [] } = opts
   if (!language || language === 'any' || language === 'en') return []
   const type = mediaType === 'tv' ? 'tv' : 'movie'
-  const k = `${type}:${language}:${genreId ?? ''}`
-  if (discoverCache.has(k)) return discoverCache.get(k)
-  const params = {
+  const kwKey = keywordIds.slice(0, 3).join(',')
+  const cacheK = `${type}:${language}:${genreId ?? ''}:${kwKey}`
+  if (discoverCache.has(cacheK)) return discoverCache.get(cacheK)
+
+  const baseParams = {
     with_original_language: language,
     sort_by: 'popularity.desc',
     include_adult: false,
-    page: 1,
   }
-  if (genreId) params.with_genres = genreId
-  const { data } = await client.get(`/discover/${type}`, { params })
-  const results = (data.results ?? [])
-    .filter((r) => r.poster_path)
-    .map((r) => ({ ...r, media_type: type }))
-  discoverCache.set(k, results)
-  return results
+  if (genreId) baseParams.with_genres = genreId
+
+  const calls = []
+  // Keyword-augmented (relevance-first). TMDB treats '|' as OR.
+  if (keywordIds.length) {
+    calls.push(
+      client
+        .get(`/discover/${type}`, {
+          params: { ...baseParams, with_keywords: keywordIds.slice(0, 3).join('|'), page: 1 },
+        })
+        .catch(() => null),
+    )
+  }
+  // Popular fallback: pages 1 + 2 of plain genre+language popularity.
+  for (const page of [1, 2]) {
+    calls.push(client.get(`/discover/${type}`, { params: { ...baseParams, page } }).catch(() => null))
+  }
+  const responses = await Promise.all(calls)
+
+  const seen = new Set()
+  const out = []
+  for (const resp of responses) {
+    if (!resp) continue
+    for (const r of resp.data?.results ?? []) {
+      if (seen.has(r.id) || !r.poster_path) continue
+      seen.add(r.id)
+      out.push({ ...r, media_type: type })
+    }
+  }
+  discoverCache.set(cacheK, out)
+  return out
 }
 
 export async function getCredits(mediaType, id) {
