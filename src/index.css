@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 6% 8%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 20%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html, body, #root { height: 100%; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    @apply bg-background text-foreground;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* React Flow overrides for our dark cinematic theme */
+.react-flow {
+  --rf-background: #0a0a0a;
+  background: var(--rf-background);
+}
+.react-flow__background {
+  background-color: #0a0a0a;
+}
+.react-flow__minimap {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.react-flow__controls {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: transparent !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  color: hsl(var(--foreground)) !important;
+  fill: currentColor;
+}
+.react-flow__controls-button:hover {
+  background: hsl(var(--accent)) !important;
+}
+
+/* Lift hovered nodes above neighbours and edges */
+.react-flow__node {
+  transition: z-index 0s;
+}
+.react-flow__node:hover,
+.react-flow__node:focus-within {
+  z-index: 50 !important;
+}
+@media (max-width: 640px) {
+  .react-flow__controls-button {
+    width: 34px !important;
+    height: 34px !important;
+  }
+  .react-flow__edge-text {
+    font-size: 10px;
+  }
+}
+
+.react-flow__edge-path {
+  stroke-width: 1.75;
+}
+.edge-animated .react-flow__edge-path {
+  stroke-dasharray: 6 6;
+  animation: edge-dash 1.2s linear infinite;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus .react-flow__edge-path {
+  stroke-width: 2.5;
+}
+.react-flow__edge-text {
+  fill: hsl(var(--foreground));
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.react-flow__edge-textbg {
+  fill: hsl(var(--card));
+  stroke: hsl(var(--border));
+  stroke-width: 1;
+}
+/* Soft labels by default — fully visible on hover or selection */
+.react-flow__edge-text,
+.react-flow__edge-textbg {
+  opacity: 0.55;
+  transition: opacity 0.15s ease-out;
+}
+.react-flow__edge:hover .react-flow__edge-text,
+.react-flow__edge:hover .react-flow__edge-textbg,
+.react-flow__edge.selected .react-flow__edge-text,
+.react-flow__edge.selected .react-flow__edge-textbg {
+  opacity: 1;
+}
+
+.react-flow__attribution {
+  background: transparent !important;
+  color: hsl(var(--muted-foreground)) !important;
+  font-size: 10px !important;
+}
+
+/* Subtle dot grid background */
+.canvas-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
