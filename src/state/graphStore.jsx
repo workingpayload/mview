@@ -1,5 +1,15 @@
 import React, { createContext, useContext, useReducer, useCallback, useMemo, useRef, useEffect } from 'react'
-import { getDetails, getRecommendations, getCredits, getWatchProviders, getKeywords, discoverByLanguage, title, year } from '@/api/tmdb'
+import {
+  getDetails,
+  getRecommendations,
+  getCredits,
+  getWatchProviders,
+  getKeywords,
+  discoverByLanguage,
+  discoverBySubject,
+  title,
+  year,
+} from '@/api/tmdb'
 import { pickConnectionReason } from '@/graph/connectionReason'
 import { buildEdge } from '@/graph/edges'
 import { placeAroundNode, radialLayout } from '@/graph/layout'
@@ -143,31 +153,41 @@ function interleaveById(...lists) {
   return out
 }
 
-// Pick `count` items from the regional-language pool with relevance bias and
-// just enough randomness that re-searching doesn't surface the exact same
-// titles every time. `excludeIds` is a Set of nodeIds already on the canvas
-// (movie-550 etc.) so we never propose a Hindi title the user is already
-// looking at.
+// Pool comes in already sorted by relevance: subject-overlap matches first
+// (sorted by how many of the center's keyword lists they appeared in), then
+// language+genre discover backfill. Deterministic top-N — variety naturally
+// comes from different searches producing different keyword sets, no need
+// to randomise picks within a single search.
 function sampleRegional(pool, count, excludeIds) {
-  const filtered = pool.filter((r) => {
-    const id = `${r.media_type ?? 'movie'}-${r.id}`
-    return !excludeIds.has(id)
-  })
-  const out = []
-  const remaining = [...filtered]
-  while (out.length < count && remaining.length > 0) {
-    // Always favour subject-matched items when they're still in the pool;
-    // they live at the front because discoverByLanguage emits them first.
-    // 70% pick from the top 10 (subject-relevant + popular in genre); 30%
-    // dip into the longer tail for variety on repeated searches.
-    const topWindow = Math.min(10, remaining.length)
-    const useTop = Math.random() < 0.7
-    const idx = useTop
-      ? Math.floor(Math.random() * topWindow)
-      : Math.floor(Math.random() * remaining.length)
-    out.push(remaining.splice(idx, 1)[0])
-  }
-  return out
+  return pool
+    .filter((r) => !excludeIds.has(`${r.media_type ?? 'movie'}-${r.id}`))
+    .slice(0, count)
+}
+
+// Build a combined regional pool: high-precision subject overlap matches at
+// the front, then keyword/genre/popularity discover as backfill. Items already
+// in subject matches are removed from the discover backfill to avoid dups.
+async function buildRegionalPool({ mediaType, details, keywords, language, region }) {
+  if (!language || language === 'any' || language === 'en') return []
+  const genreId = details?.genres?.[0]?.id ?? null
+  const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
+  const originCountry = region ?? null
+
+  const [subjectMatches, discoverPool] = await Promise.all([
+    mediaType === 'movie'
+      ? discoverBySubject({
+          keywordIds,
+          originalLanguage: language,
+          originCountry,
+          mediaType,
+        }).catch(() => [])
+      : Promise.resolve([]),
+    discoverByLanguage(mediaType, language, { genreId, keywordIds, originCountry }).catch(() => []),
+  ])
+
+  const subjectIds = new Set(subjectMatches.map((s) => `movie-${s.id}`))
+  const backfill = discoverPool.filter((r) => !subjectIds.has(`${r.media_type}-${r.id}`))
+  return [...subjectMatches, ...backfill]
 }
 
 function markCentered(node, isCenter) {
@@ -267,17 +287,16 @@ export function GraphProvider({ children }) {
         getRecommendations(mediaType, item.id),
         getKeywords(mediaType, item.id).catch(() => []),
       ])
-      // Augment with keyword-relevant regional-language titles. Sampling adds
-      // variety so repeated searches don't show identical Hindi suggestions.
-      const lang = langRef.current
-      const genreId = details?.genres?.[0]?.id ?? null
-      const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
-      const originCountry = regionRef.current === 'IN' ? 'IN' : null
-      const regionalPool = await discoverByLanguage(mediaType, lang, {
-        genreId,
-        keywordIds,
-        originCountry,
-      }).catch(() => [])
+      // Build a regional pool ordered by relevance — subject-overlap matches
+      // first (TMDB-curated keyword lists, scored by overlap with center),
+      // discover backfill behind. No rating signal at any stage.
+      const regionalPool = await buildRegionalPool({
+        mediaType,
+        details,
+        keywords,
+        language: langRef.current,
+        region: regionRef.current,
+      })
       const excludeIds = new Set([nodeId(mediaType, item.id)])
       const regional = sampleRegional(regionalPool, 8, excludeIds)
       const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
@@ -346,15 +365,13 @@ export function GraphProvider({ children }) {
           getRecommendations(mediaType, tmdbId),
           getKeywords(mediaType, tmdbId).catch(() => []),
         ])
-        const lang = langRef.current
-        const genreId = details?.genres?.[0]?.id ?? null
-        const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
-        const originCountry = regionRef.current === 'IN' ? 'IN' : null
-        const regionalPool = await discoverByLanguage(mediaType, lang, {
-          genreId,
-          keywordIds,
-          originCountry,
-        }).catch(() => [])
+        const regionalPool = await buildRegionalPool({
+          mediaType,
+          details,
+          keywords,
+          language: langRef.current,
+          region: regionRef.current,
+        })
         const excludeIds = new Set(state.nodes.map((n) => n.id))
         const regional = sampleRegional(regionalPool, 6, excludeIds)
         const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs

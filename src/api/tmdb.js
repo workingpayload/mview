@@ -49,6 +49,8 @@ const creditsCache = new Map()
 const providersCache = new Map()
 const discoverCache = new Map()
 const keywordsCache = new Map()
+const keywordMoviesCache = new Map()
+const subjectCache = new Map()
 
 function cacheKey(mediaType, id) {
   return `${mediaType}:${id}`
@@ -89,6 +91,75 @@ export async function getKeywords(mediaType, id) {
   const list = mediaType === 'tv' ? (data.results ?? []) : (data.keywords ?? [])
   keywordsCache.set(k, list)
   return list
+}
+
+// TMDB-curated list of movies tagged with a given keyword. This is far more
+// precise than /discover's `with_keywords` text-matching: TMDB editors actually
+// curated these lists, so a film appearing in /keyword/3577/movies is genuinely
+// about dreams, not just text-matching.
+// Movie-only endpoint; TV has no equivalent.
+export async function getMoviesByKeyword(keywordId, page = 1) {
+  const k = `${keywordId}:${page}`
+  if (keywordMoviesCache.has(k)) return keywordMoviesCache.get(k)
+  try {
+    const { data } = await client.get(`/keyword/${keywordId}/movies`, { params: { page } })
+    const out = (data.results ?? []).filter((r) => r.poster_path)
+    keywordMoviesCache.set(k, out)
+    return out
+  } catch {
+    keywordMoviesCache.set(k, [])
+    return []
+  }
+}
+
+// Score-based subject matcher. For each of the center's top keywords we fetch
+// its curated movie list, then score every candidate by how many of those
+// lists it appears in. A film inheriting 4-of-5 keywords is way more relevant
+// than one popular Bollywood title that just shares a genre.
+//
+// `originalLanguage` and `originCountry` are OR-filtered — a film passes if
+// either matches the user's region hints. That lets Tamil/Telugu/etc. Indian
+// films through alongside Hindi when region=IN.
+//
+// Returns array sorted by score desc, vote_count desc as tiebreaker (never
+// vote_average — user explicitly asked not to recommend by rating).
+export async function discoverBySubject({
+  keywordIds = [],
+  originalLanguage = null,
+  originCountry = null,
+  mediaType = 'movie',
+}) {
+  if (mediaType !== 'movie' || !keywordIds.length) return []
+  const top = keywordIds.slice(0, 5)
+  const cacheK = `${top.join(',')}:${originalLanguage ?? ''}:${originCountry ?? ''}`
+  if (subjectCache.has(cacheK)) return subjectCache.get(cacheK)
+
+  const lists = await Promise.all(top.map((id) => getMoviesByKeyword(id, 1)))
+  const score = new Map()
+  for (const list of lists) {
+    for (const r of list) {
+      // Hint check: pass through if EITHER language or origin matches when
+      // those hints are provided. If neither hint is set, nothing is filtered.
+      if (originalLanguage || originCountry) {
+        const langOk = originalLanguage ? r.original_language === originalLanguage : false
+        const countryOk = originCountry ? r.origin_country?.includes(originCountry) : false
+        if (!langOk && !countryOk) continue
+      }
+      const entry = score.get(r.id) ?? { item: r, score: 0 }
+      entry.score += 1
+      score.set(r.id, entry)
+    }
+  }
+  const out = [...score.values()]
+    .sort((a, b) => b.score - a.score || (b.item.vote_count ?? 0) - (a.item.vote_count ?? 0))
+    .map(({ item, score: s }) => ({
+      ...item,
+      media_type: 'movie',
+      __subjectMatched: true,
+      __subjectScore: s,
+    }))
+  subjectCache.set(cacheK, out)
+  return out
 }
 
 // /discover pool used to inject regional-language content into rec graphs.
