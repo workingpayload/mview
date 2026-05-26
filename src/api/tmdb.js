@@ -51,6 +51,7 @@ const discoverCache = new Map()
 const keywordsCache = new Map()
 const keywordMoviesCache = new Map()
 const subjectCache = new Map()
+const tvSubjectCache = new Map()
 
 function cacheKey(mediaType, id) {
   return `${mediaType}:${id}`
@@ -151,6 +152,9 @@ export async function discoverBySubject({
     }
   }
   const out = [...score.values()]
+    // Require ≥2 keyword overlap. Single shared keyword (e.g., generic tags
+    // like "based on novel" or "satire") is too noisy a signal.
+    .filter(({ score: s }) => s >= 2)
     .sort((a, b) => b.score - a.score || (b.item.vote_count ?? 0) - (a.item.vote_count ?? 0))
     .map(({ item, score: s }) => ({
       ...item,
@@ -160,6 +164,75 @@ export async function discoverBySubject({
     }))
   subjectCache.set(cacheK, out)
   return out
+}
+
+// TV has no /keyword/{id}/tv endpoint, so we score relevance ourselves:
+// 1. Fetch a candidate pool of regional TV (lang + origin, no keyword filter)
+// 2. For each candidate, fetch /tv/{id}/keywords
+// 3. Score by exact keyword-id overlap with center
+// 4. Drop everything with zero overlap, sort by score desc
+//
+// This is more expensive than discoverBySubject (one keyword fetch per
+// candidate) but caches aggressively. Limited to top-18 candidates so it stays
+// under ~20 extra requests per TV search.
+export async function discoverTvBySubject({
+  centerKeywordIds = [],
+  originalLanguage = null,
+  originCountry = null,
+}) {
+  if (!centerKeywordIds.length) return []
+  const cacheK = `${centerKeywordIds.slice(0, 5).join(',')}:${originalLanguage ?? ''}:${originCountry ?? ''}`
+  if (tvSubjectCache.has(cacheK)) return tvSubjectCache.get(cacheK)
+
+  const baseParams = {
+    sort_by: 'popularity.desc',
+    include_adult: false,
+  }
+  if (originalLanguage) baseParams.with_original_language = originalLanguage
+  if (originCountry) baseParams.with_origin_country = originCountry
+
+  // Two pages = ~40 candidates by popularity, then we keep the top 18 to score.
+  const [p1, p2] = await Promise.all([
+    client.get('/discover/tv', { params: { ...baseParams, page: 1 } }).catch(() => null),
+    client.get('/discover/tv', { params: { ...baseParams, page: 2 } }).catch(() => null),
+  ])
+  const seen = new Set()
+  const pool = []
+  for (const r of [...(p1?.data?.results ?? []), ...(p2?.data?.results ?? [])]) {
+    if (!r.poster_path || seen.has(r.id)) continue
+    seen.add(r.id)
+    pool.push(r)
+  }
+  const candidates = pool.slice(0, 18)
+
+  const centerSet = new Set(centerKeywordIds)
+  const scored = await Promise.all(
+    candidates.map(async (c) => {
+      try {
+        const kws = await getKeywords('tv', c.id)
+        let score = 0
+        for (const k of kws ?? []) if (centerSet.has(k.id)) score++
+        return { item: c, score }
+      } catch {
+        return { item: c, score: 0 }
+      }
+    }),
+  )
+
+  const matches = scored
+    // Require ≥2 keyword overlap so a single generic tag (e.g., "satire" or
+    // "based on book") shared between center and candidate doesn't qualify.
+    .filter((s) => s.score >= 2)
+    .sort((a, b) => b.score - a.score || (b.item.vote_count ?? 0) - (a.item.vote_count ?? 0))
+    .map(({ item, score: s }) => ({
+      ...item,
+      media_type: 'tv',
+      __subjectMatched: true,
+      __subjectScore: s,
+    }))
+
+  tvSubjectCache.set(cacheK, matches)
+  return matches
 }
 
 // /discover pool used to inject regional-language content into rec graphs.

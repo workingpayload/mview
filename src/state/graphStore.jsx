@@ -5,8 +5,8 @@ import {
   getCredits,
   getWatchProviders,
   getKeywords,
-  discoverByLanguage,
   discoverBySubject,
+  discoverTvBySubject,
   title,
   year,
 } from '@/api/tmdb'
@@ -164,30 +164,47 @@ function sampleRegional(pool, count, excludeIds) {
     .slice(0, count)
 }
 
-// Build a combined regional pool: high-precision subject overlap matches at
-// the front, then keyword/genre/popularity discover as backfill. Items already
-// in subject matches are removed from the discover backfill to avoid dups.
+// TMDB's /recommendations and /similar endpoints reflect co-viewing patterns,
+// not subject overlap. For English centres the Indian-viewer overlap bleeds
+// in unrelated Hindi titles (The Boys → Panchayat). Drop cross-language items
+// from baseRecs unless they're in the verified subject-overlap pool.
+function filterBaseRecsByLanguage({ baseRecs, centerLang, mediaType, regionalPool }) {
+  if (!centerLang) return baseRecs
+  const verifiedIds = new Set(
+    regionalPool.map((r) => `${r.media_type ?? mediaType}-${r.id}`),
+  )
+  return baseRecs.filter((r) => {
+    if (!r.original_language || r.original_language === centerLang) return true
+    return verifiedIds.has(`${r.media_type ?? mediaType}-${r.id}`)
+  })
+}
+
+// Build a regional pool of ONLY items with verified keyword overlap with the
+// center title. No popularity backfill — if subject scoring finds zero
+// overlapping titles, the pool stays empty. Better to surface no regional
+// suggestion than a thematically unrelated one (e.g., Panchayat for The Boys
+// just because both are popular Hindi Drama).
 async function buildRegionalPool({ mediaType, details, keywords, language, region }) {
+  void details // kept for signature stability; not used now that backfill is gone
   if (!language || language === 'any' || language === 'en') return []
-  const genreId = details?.genres?.[0]?.id ?? null
   const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
+  if (!keywordIds.length) return []
   const originCountry = region ?? null
 
-  const [subjectMatches, discoverPool] = await Promise.all([
-    mediaType === 'movie'
-      ? discoverBySubject({
-          keywordIds,
-          originalLanguage: language,
-          originCountry,
-          mediaType,
-        }).catch(() => [])
-      : Promise.resolve([]),
-    discoverByLanguage(mediaType, language, { genreId, keywordIds, originCountry }).catch(() => []),
-  ])
-
-  const subjectIds = new Set(subjectMatches.map((s) => `movie-${s.id}`))
-  const backfill = discoverPool.filter((r) => !subjectIds.has(`${r.media_type}-${r.id}`))
-  return [...subjectMatches, ...backfill]
+  if (mediaType === 'movie') {
+    return discoverBySubject({
+      keywordIds,
+      originalLanguage: language,
+      originCountry,
+      mediaType,
+    }).catch(() => [])
+  }
+  // TV — no /keyword/X/tv endpoint, so we score per-candidate.
+  return discoverTvBySubject({
+    centerKeywordIds: keywordIds,
+    originalLanguage: language,
+    originCountry,
+  }).catch(() => [])
 }
 
 function markCentered(node, isCenter) {
@@ -299,7 +316,13 @@ export function GraphProvider({ children }) {
       })
       const excludeIds = new Set([nodeId(mediaType, item.id)])
       const regional = sampleRegional(regionalPool, 8, excludeIds)
-      const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
+      const cleanBaseRecs = filterBaseRecsByLanguage({
+        baseRecs,
+        centerLang: details?.original_language ?? null,
+        mediaType,
+        regionalPool,
+      })
+      const recs = regional.length ? interleaveById(cleanBaseRecs, regional) : cleanBaseRecs
       const centerPos = { x: 0, y: 0 }
       const centerNode = buildNode({
         item: { ...item, ...details },
@@ -374,7 +397,13 @@ export function GraphProvider({ children }) {
         })
         const excludeIds = new Set(state.nodes.map((n) => n.id))
         const regional = sampleRegional(regionalPool, 6, excludeIds)
-        const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
+        const cleanBaseRecs = filterBaseRecsByLanguage({
+          baseRecs,
+          centerLang: details?.original_language ?? null,
+          mediaType,
+          regionalPool,
+        })
+        const recs = regional.length ? interleaveById(cleanBaseRecs, regional) : cleanBaseRecs
         const limit = 8
         const picks = recs.slice(0, limit)
         const recCreditsArr = await Promise.all(
