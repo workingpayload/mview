@@ -156,10 +156,12 @@ function sampleRegional(pool, count, excludeIds) {
   const out = []
   const remaining = [...filtered]
   while (out.length < count && remaining.length > 0) {
-    // 65% of the time pick from the top 8 (relevance/popularity); otherwise
+    // Always favour subject-matched items when they're still in the pool;
+    // they live at the front because discoverByLanguage emits them first.
+    // 70% pick from the top 10 (subject-relevant + popular in genre); 30%
     // dip into the longer tail for variety on repeated searches.
-    const topWindow = Math.min(8, remaining.length)
-    const useTop = Math.random() < 0.65
+    const topWindow = Math.min(10, remaining.length)
+    const useTop = Math.random() < 0.7
     const idx = useTop
       ? Math.floor(Math.random() * topWindow)
       : Math.floor(Math.random() * remaining.length)
@@ -269,8 +271,13 @@ export function GraphProvider({ children }) {
       // variety so repeated searches don't show identical Hindi suggestions.
       const lang = langRef.current
       const genreId = details?.genres?.[0]?.id ?? null
-      const keywordIds = (keywords ?? []).slice(0, 3).map((k) => k.id)
-      const regionalPool = await discoverByLanguage(mediaType, lang, { genreId, keywordIds }).catch(() => [])
+      const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
+      const originCountry = regionRef.current === 'IN' ? 'IN' : null
+      const regionalPool = await discoverByLanguage(mediaType, lang, {
+        genreId,
+        keywordIds,
+        originCountry,
+      }).catch(() => [])
       const excludeIds = new Set([nodeId(mediaType, item.id)])
       const regional = sampleRegional(regionalPool, 8, excludeIds)
       const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs
@@ -341,8 +348,13 @@ export function GraphProvider({ children }) {
         ])
         const lang = langRef.current
         const genreId = details?.genres?.[0]?.id ?? null
-        const keywordIds = (keywords ?? []).slice(0, 3).map((k) => k.id)
-        const regionalPool = await discoverByLanguage(mediaType, lang, { genreId, keywordIds }).catch(() => [])
+        const keywordIds = (keywords ?? []).slice(0, 5).map((k) => k.id)
+        const originCountry = regionRef.current === 'IN' ? 'IN' : null
+        const regionalPool = await discoverByLanguage(mediaType, lang, {
+          genreId,
+          keywordIds,
+          originCountry,
+        }).catch(() => [])
         const excludeIds = new Set(state.nodes.map((n) => n.id))
         const regional = sampleRegional(regionalPool, 6, excludeIds)
         const recs = regional.length ? interleaveById(baseRecs, regional) : baseRecs

@@ -92,15 +92,19 @@ export async function getKeywords(mediaType, id) {
 }
 
 // /discover pool used to inject regional-language content into rec graphs.
-// Strategy: try keyword-augmented discover first (high relevance), then page
-// 1-2 of popularity-sorted as a fallback so we always have a fuller pool to
-// sample from. Returns a deduped array with keyword matches listed first.
+// Strategy is genre + subject (keywords) first, never rating. Three queries
+// run in parallel for a fuller pool:
+//   1. with_genres + with_keywords  (strict: same genre AND same subject)
+//   2. with_keywords (no genre)     (relaxed: same subject, any genre)
+//   3. with_genres only             (broad: same genre, popular)
+// Items from #1 and #2 are tagged `__subjectMatched: true` so the connection-
+// reason logic can label edges as "Same Subject" downstream.
 export async function discoverByLanguage(mediaType, language, opts = {}) {
-  const { genreId = null, keywordIds = [] } = opts
+  const { genreId = null, keywordIds = [], originCountry = null } = opts
   if (!language || language === 'any' || language === 'en') return []
   const type = mediaType === 'tv' ? 'tv' : 'movie'
-  const kwKey = keywordIds.slice(0, 3).join(',')
-  const cacheK = `${type}:${language}:${genreId ?? ''}:${kwKey}`
+  const kw = keywordIds.slice(0, 5)
+  const cacheK = `${type}:${language}:${genreId ?? ''}:${kw.join(',')}:${originCountry ?? ''}`
   if (discoverCache.has(cacheK)) return discoverCache.get(cacheK)
 
   const baseParams = {
@@ -108,35 +112,54 @@ export async function discoverByLanguage(mediaType, language, opts = {}) {
     sort_by: 'popularity.desc',
     include_adult: false,
   }
-  if (genreId) baseParams.with_genres = genreId
+  if (originCountry) baseParams.with_origin_country = originCountry
 
-  const calls = []
-  // Keyword-augmented (relevance-first). TMDB treats '|' as OR.
-  if (keywordIds.length) {
-    calls.push(
-      client
-        .get(`/discover/${type}`, {
-          params: { ...baseParams, with_keywords: keywordIds.slice(0, 3).join('|'), page: 1 },
-        })
-        .catch(() => null),
-    )
+  const callDefs = []
+  if (kw.length) {
+    // 1. strict — genre AND subject
+    if (genreId) {
+      callDefs.push({
+        params: { ...baseParams, with_genres: genreId, with_keywords: kw.join('|'), page: 1 },
+        tag: 'subject',
+      })
+    }
+    // 2. relaxed — subject only (any genre)
+    callDefs.push({
+      params: { ...baseParams, with_keywords: kw.join('|'), page: 1 },
+      tag: 'subject',
+    })
   }
-  // Popular fallback: pages 1 + 2 of plain genre+language popularity.
-  for (const page of [1, 2]) {
-    calls.push(client.get(`/discover/${type}`, { params: { ...baseParams, page } }).catch(() => null))
+  // 3. broad — genre popularity, two pages
+  if (genreId) {
+    for (const page of [1, 2]) {
+      callDefs.push({
+        params: { ...baseParams, with_genres: genreId, page },
+        tag: 'genre',
+      })
+    }
+  } else {
+    callDefs.push({ params: { ...baseParams, page: 1 }, tag: 'genre' })
   }
-  const responses = await Promise.all(calls)
+
+  const responses = await Promise.all(
+    callDefs.map((d) => client.get(`/discover/${type}`, { params: d.params }).catch(() => null)),
+  )
 
   const seen = new Set()
   const out = []
-  for (const resp of responses) {
-    if (!resp) continue
+  responses.forEach((resp, i) => {
+    if (!resp) return
+    const tag = callDefs[i].tag
     for (const r of resp.data?.results ?? []) {
       if (seen.has(r.id) || !r.poster_path) continue
       seen.add(r.id)
-      out.push({ ...r, media_type: type })
+      out.push({
+        ...r,
+        media_type: type,
+        __subjectMatched: tag === 'subject',
+      })
     }
-  }
+  })
   discoverCache.set(cacheK, out)
   return out
 }

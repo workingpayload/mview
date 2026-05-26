@@ -6,8 +6,8 @@ import { cn } from '@/lib/utils'
 const ITEMS = [
   { kind: 'director', label: 'Same director' },
   { kind: 'cast', label: 'Shared cast' },
+  { kind: 'subject', label: 'Same subject' },
   { kind: 'genre', label: 'Same genre' },
-  { kind: 'rating', label: 'Similar rating' },
   { kind: 'recommended', label: 'Recommended' },
 ]
 
