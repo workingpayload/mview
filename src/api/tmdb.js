@@ -1,5 +1,31 @@
 import axios from 'axios'
 import { detectRegion } from '@/lib/region'
+import { isBlocked, setBlocked } from './healthCheck'
+import * as fallback from './fallback'
+
+// A missing `err.response` means no HTTP reply ever came back: DNS failure,
+// TLS reset, timeout, opaque CORS — the exact signature of an ISP block.
+// A 401/403 HAS a response, so it's correctly treated as reachable-but-misconfig.
+function isNetworkError(err) {
+  return !err?.response
+}
+
+// Run the TMDB path; if it dies at the network level, flip the blocked flag
+// and self-heal onto the fallback layer for THIS call (and every call after,
+// via isBlocked()). Fixes the first-load race where the health-check probe
+// hasn't resolved yet, and recovers if a block begins mid-session.
+async function guarded(tmdbFn, fallbackFn) {
+  if (isBlocked()) return fallbackFn()
+  try {
+    return await tmdbFn()
+  } catch (err) {
+    if (isNetworkError(err)) {
+      setBlocked(true)
+      return fallbackFn()
+    }
+    throw err
+  }
+}
 
 const API_KEY = import.meta.env.VITE_TMDB_API_KEY
 const BASE = 'https://api.themoviedb.org/3'
@@ -18,29 +44,42 @@ const client = axios.create({
   timeout: 12000,
 })
 
+// imgUrl needs to handle both TMDB relative paths AND full URLs that come
+// from Fanart.tv / OMDb when the fallback layer is active.
 export function imgUrl(path, size = 'w342') {
   if (!path) return null
+  if (typeof path === 'string' && /^https?:\/\//.test(path)) return path
   return `${IMG_BASE}/${size}${path}`
 }
 
 let trendingCache = null
-export async function getTrending(window = 'week') {
-  if (trendingCache) return trendingCache
-  const { data } = await client.get(`/trending/all/${window}`)
-  trendingCache = (data.results ?? [])
-    .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
-    .slice(0, 12)
-  return trendingCache
+export function getTrending(window = 'week') {
+  return guarded(
+    async () => {
+      if (trendingCache) return trendingCache
+      const { data } = await client.get(`/trending/all/${window}`)
+      trendingCache = (data.results ?? [])
+        .filter((r) => (r.media_type === 'movie' || r.media_type === 'tv') && r.poster_path)
+        .slice(0, 12)
+      return trendingCache
+    },
+    () => fallback.getTrending(),
+  )
 }
 
-export async function searchMulti(query) {
-  if (!query) return []
-  const { data } = await client.get('/search/multi', {
-    params: { query, include_adult: false, page: 1 },
-  })
-  return (data.results ?? [])
-    .filter((r) => r.media_type === 'movie' || r.media_type === 'tv')
-    .filter((r) => r.poster_path || r.backdrop_path)
+export function searchMulti(query) {
+  if (!query) return Promise.resolve([])
+  return guarded(
+    async () => {
+      const { data } = await client.get('/search/multi', {
+        params: { query, include_adult: false, page: 1 },
+      })
+      return (data.results ?? [])
+        .filter((r) => r.media_type === 'movie' || r.media_type === 'tv')
+        .filter((r) => r.poster_path || r.backdrop_path)
+    },
+    () => fallback.searchMulti(query),
+  )
 }
 
 const detailsCache = new Map()
@@ -57,29 +96,39 @@ function cacheKey(mediaType, id) {
   return `${mediaType}:${id}`
 }
 
-export async function getDetails(mediaType, id) {
-  const k = cacheKey(mediaType, id)
-  if (detailsCache.has(k)) return detailsCache.get(k)
-  const { data } = await client.get(`/${mediaType}/${id}`)
-  detailsCache.set(k, data)
-  return data
+export function getDetails(mediaType, id) {
+  return guarded(
+    async () => {
+      const k = cacheKey(mediaType, id)
+      if (detailsCache.has(k)) return detailsCache.get(k)
+      const { data } = await client.get(`/${mediaType}/${id}`)
+      detailsCache.set(k, data)
+      return data
+    },
+    () => fallback.getDetails(mediaType, id),
+  )
 }
 
-export async function getRecommendations(mediaType, id) {
-  const k = cacheKey(mediaType, id)
-  if (recsCache.has(k)) return recsCache.get(k)
-  const [{ data: rec }, { data: sim }] = await Promise.all([
-    client.get(`/${mediaType}/${id}/recommendations`),
-    client.get(`/${mediaType}/${id}/similar`),
-  ])
-  const map = new Map()
-  for (const r of rec.results ?? []) map.set(r.id, r)
-  for (const s of sim.results ?? []) if (!map.has(s.id)) map.set(s.id, s)
-  const list = [...map.values()]
-    .filter((r) => r.poster_path)
-    .map((r) => ({ ...r, media_type: mediaType }))
-  recsCache.set(k, list)
-  return list
+export function getRecommendations(mediaType, id) {
+  return guarded(
+    async () => {
+      const k = cacheKey(mediaType, id)
+      if (recsCache.has(k)) return recsCache.get(k)
+      const [{ data: rec }, { data: sim }] = await Promise.all([
+        client.get(`/${mediaType}/${id}/recommendations`),
+        client.get(`/${mediaType}/${id}/similar`),
+      ])
+      const map = new Map()
+      for (const r of rec.results ?? []) map.set(r.id, r)
+      for (const s of sim.results ?? []) if (!map.has(s.id)) map.set(s.id, s)
+      const list = [...map.values()]
+        .filter((r) => r.poster_path)
+        .map((r) => ({ ...r, media_type: mediaType }))
+      recsCache.set(k, list)
+      return list
+    },
+    () => fallback.getRecommendations(mediaType, id),
+  )
 }
 
 // Keywords help relevance: searching "Inception" returns Hindi *thrillers*,
@@ -303,34 +352,44 @@ export async function discoverByLanguage(mediaType, language, opts = {}) {
   return out
 }
 
-export async function getCredits(mediaType, id) {
-  const k = cacheKey(mediaType, id)
-  if (creditsCache.has(k)) return creditsCache.get(k)
-  const { data } = await client.get(`/${mediaType}/${id}/credits`)
-  creditsCache.set(k, data)
-  return data
+export function getCredits(mediaType, id) {
+  return guarded(
+    async () => {
+      const k = cacheKey(mediaType, id)
+      if (creditsCache.has(k)) return creditsCache.get(k)
+      const { data } = await client.get(`/${mediaType}/${id}/credits`)
+      creditsCache.set(k, data)
+      return data
+    },
+    () => fallback.getCredits(mediaType, id),
+  )
 }
 
-export async function getWatchProviders(mediaType, id, region = DEFAULT_REGION) {
-  const k = `${cacheKey(mediaType, id)}:${region}`
-  if (providersCache.has(k)) return providersCache.get(k)
-  const { data } = await client.get(`/${mediaType}/${id}/watch/providers`)
-  const regionData = data.results?.[region] ?? {}
-  const flatrate = regionData.flatrate ?? []
-  const ads = regionData.ads ?? []
-  const free = regionData.free ?? []
-  const link = regionData.link ?? null
-  const combined = [...flatrate, ...free, ...ads]
-  const dedup = []
-  const seen = new Set()
-  for (const p of combined) {
-    if (seen.has(p.provider_id)) continue
-    seen.add(p.provider_id)
-    dedup.push(p)
-  }
-  const result = { providers: dedup, link }
-  providersCache.set(k, result)
-  return result
+export function getWatchProviders(mediaType, id, region = DEFAULT_REGION) {
+  return guarded(
+    async () => {
+      const k = `${cacheKey(mediaType, id)}:${region}`
+      if (providersCache.has(k)) return providersCache.get(k)
+      const { data } = await client.get(`/${mediaType}/${id}/watch/providers`)
+      const regionData = data.results?.[region] ?? {}
+      const flatrate = regionData.flatrate ?? []
+      const ads = regionData.ads ?? []
+      const free = regionData.free ?? []
+      const link = regionData.link ?? null
+      const combined = [...flatrate, ...free, ...ads]
+      const dedup = []
+      const seen = new Set()
+      for (const p of combined) {
+        if (seen.has(p.provider_id)) continue
+        seen.add(p.provider_id)
+        dedup.push(p)
+      }
+      const result = { providers: dedup, link }
+      providersCache.set(k, result)
+      return result
+    },
+    () => fallback.getWatchProviders(mediaType, id, region),
+  )
 }
 
 export function title(item) {

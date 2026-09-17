@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { Handle, Position } from '@xyflow/react'
 import { Star, Film, Tv, Loader2, ExternalLink } from 'lucide-react'
 import { Card } from '@/components/ui/card'
@@ -7,7 +7,39 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { StreamingBadges } from '@/components/StreamingBadges'
 import { genreColor, genreLabel } from '@/lib/genres'
 import { imgUrl } from '@/api/tmdb'
+import { setBlocked } from '@/api/healthCheck'
 import { cn } from '@/lib/utils'
+
+// A poster whose image comes from image.tmdb.org can fail even when the API
+// probe passed — Jio blocks the image CDN subdomain too. Treat that onError as
+// a block signal (so future data calls route through the fallback layer) and
+// degrade to the media-type placeholder icon instead of a broken-image box.
+function Poster({ path, alt, mediaType, className }) {
+  const [failed, setFailed] = useState(false)
+  const src = path ? imgUrl(path, 'w342') : null
+  if (!src || failed) {
+    return (
+      <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+        {mediaType === 'tv' ? <Tv className="h-8 w-8" /> : <Film className="h-8 w-8" />}
+      </div>
+    )
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      draggable={false}
+      className={className}
+      onError={() => {
+        // Only a TMDB-CDN failure implies an ISP block; a broken Fanart/OMDb
+        // full URL (already-in-fallback mode) shouldn't re-trigger it.
+        if (src.includes('image.tmdb.org')) setBlocked(true)
+        setFailed(true)
+      }}
+    />
+  )
+}
 
 function MovieNodeBase({ data, selected }) {
   const accent = genreColor(data.genreId, 60, 75, 1)
@@ -44,19 +76,12 @@ function MovieNodeBase({ data, selected }) {
             }}
           >
             <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted">
-              {data.posterPath ? (
-                <img
-                  src={imgUrl(data.posterPath, 'w342')}
-                  alt={data.title}
-                  loading="lazy"
-                  draggable={false}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-                  {data.mediaType === 'tv' ? <Tv className="h-8 w-8" /> : <Film className="h-8 w-8" />}
-                </div>
-              )}
+              <Poster
+                path={data.posterPath}
+                alt={data.title}
+                mediaType={data.mediaType}
+                className="h-full w-full object-cover"
+              />
               <div
                 className="pointer-events-none absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/85 via-black/40 to-transparent"
               />
@@ -107,6 +132,10 @@ function MovieNodeBase({ data, selected }) {
               alt=""
               className="h-full w-full object-cover"
               draggable={false}
+              onError={(e) => {
+                if (e.currentTarget.src.includes('image.tmdb.org')) setBlocked(true)
+                e.currentTarget.style.display = 'none'
+              }}
             />
             <div className="absolute inset-0 bg-gradient-to-t from-popover via-popover/60 to-transparent" />
           </div>
