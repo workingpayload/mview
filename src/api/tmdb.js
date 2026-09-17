@@ -11,19 +11,30 @@ function isNetworkError(err) {
 }
 
 // Run the TMDB path; if it dies at the network level, flip the blocked flag
-// and self-heal onto the fallback layer for THIS call (and every call after,
-// via isBlocked()). Fixes the first-load race where the health-check probe
-// hasn't resolved yet, and recovers if a block begins mid-session.
+// and self-heal. Order of escape hatches when blocked:
+//   1. proxy (if VITE_TMDB_PROXY set) — full TMDB quality via allowed domain
+//   2. fallbackFn — Trakt + Fanart + OMDb (last resort, needs its own keys)
+// Also fixes the first-load race: the interceptor reroutes to the proxy the
+// moment isBlocked() flips, and a network failure retries through it immediately.
 async function guarded(tmdbFn, fallbackFn) {
-  if (isBlocked()) return fallbackFn()
+  // Already known blocked and no proxy to save us → straight to Trakt fallback.
+  if (isBlocked() && !hasProxy) return fallbackFn()
   try {
     return await tmdbFn()
   } catch (err) {
-    if (isNetworkError(err)) {
-      setBlocked(true)
-      return fallbackFn()
+    if (!isNetworkError(err)) throw err
+    setBlocked(true)
+    if (hasProxy) {
+      // isBlocked() is now true, so the request interceptor rewrites the base
+      // URL to the proxy. Retry the exact same call through it.
+      try {
+        return await tmdbFn()
+      } catch (proxyErr) {
+        if (isNetworkError(proxyErr)) return fallbackFn()
+        throw proxyErr
+      }
     }
-    throw err
+    return fallbackFn()
   }
 }
 
@@ -31,6 +42,12 @@ const API_KEY = import.meta.env.VITE_TMDB_API_KEY
 const BASE = 'https://api.themoviedb.org/3'
 const IMG_BASE = 'https://image.tmdb.org/t/p'
 const DEFAULT_REGION = detectRegion()
+
+// Optional Cloudflare Worker (or any reverse proxy) on a domain the user's ISP
+// doesn't block. When TMDB is detected as blocked, API + image traffic reroutes
+// through here — full TMDB quality, no ISP-block. See proxy/worker.js.
+const PROXY = (import.meta.env.VITE_TMDB_PROXY ?? '').replace(/\/$/, '')
+const hasProxy = Boolean(PROXY)
 
 if (!API_KEY || API_KEY === 'your_tmdb_v3_api_key_here') {
   console.warn(
@@ -44,11 +61,19 @@ const client = axios.create({
   timeout: 12000,
 })
 
-// imgUrl needs to handle both TMDB relative paths AND full URLs that come
-// from Fanart.tv / OMDb when the fallback layer is active.
+// When blocked + a proxy is configured, reroute every request through it. The
+// proxy forwards /3/* to api.themoviedb.org, so the base becomes `${PROXY}/3`.
+client.interceptors.request.use((config) => {
+  if (hasProxy && isBlocked()) config.baseURL = `${PROXY}/3`
+  return config
+})
+
+// imgUrl handles: full URLs (Fanart/OMDb fallback), proxied TMDB images when
+// blocked, and plain TMDB CDN paths otherwise.
 export function imgUrl(path, size = 'w342') {
   if (!path) return null
   if (typeof path === 'string' && /^https?:\/\//.test(path)) return path
+  if (hasProxy && isBlocked()) return `${PROXY}/t/p/${size}${path}`
   return `${IMG_BASE}/${size}${path}`
 }
 
